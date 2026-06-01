@@ -1,0 +1,1 @@
+"""FastAPI credit scoring service."""
