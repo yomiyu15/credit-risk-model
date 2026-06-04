@@ -3,6 +3,13 @@ Feature engineering and proxy target construction for credit risk modeling.
 
 Uses RFM (Recency, Frequency, Monetary) segmentation to define a Basel II–aligned
 proxy for default when no historical default labels exist in transaction data.
+
+Implements sklearn Pipeline for reproducible, scalable transformation:
+- Temporal feature extraction (hour, day, month, year)
+- Categorical encoding (One-Hot Encoding)
+- Missing value imputation
+- Numerical normalization/standardization
+- WoE transformation for interpretability
 """
 
 from __future__ import annotations
@@ -14,8 +21,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +69,189 @@ MODEL_FEATURE_COLUMNS = [
     "tenure_days",
     "transactions_per_day",
 ]
+
+
+# ============================================================================
+# Custom Transformers for sklearn Pipeline
+# ============================================================================
+
+class TemporalFeatureExtractor(BaseEstimator, TransformerMixin):
+    """Extract temporal features (hour, day, month, year) from timestamp columns."""
+
+    def __init__(self, timestamp_col: str = "TransactionStartTime"):
+        self.timestamp_col = timestamp_col
+
+    def fit(self, X: pd.DataFrame, y=None):
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X = X.copy()
+        if self.timestamp_col not in X.columns:
+            logger.warning(
+                f"Column {self.timestamp_col} not found; skipping temporal extraction")
+            return X
+
+        X[self.timestamp_col] = pd.to_datetime(
+            X[self.timestamp_col], errors="coerce")
+        X["transaction_hour"] = X[self.timestamp_col].dt.hour
+        X["transaction_day"] = X[self.timestamp_col].dt.day
+        X["transaction_month"] = X[self.timestamp_col].dt.month
+        X["transaction_year"] = X[self.timestamp_col].dt.year
+        X["transaction_dayofweek"] = X[self.timestamp_col].dt.dayofweek
+
+        # Drop original timestamp column
+        X = X.drop(columns=[self.timestamp_col], errors="ignore")
+        return X
+
+
+class CategoricalEncoder(BaseEstimator, TransformerMixin):
+    """One-Hot encode categorical columns; drop original columns."""
+
+    def __init__(self, categorical_cols: list[str] | None = None, drop: str = "first"):
+        self.categorical_cols = categorical_cols or []
+        self.drop = drop
+        self.encoder_ = None
+
+    def fit(self, X: pd.DataFrame, y=None):
+        if not self.categorical_cols:
+            # Auto-detect categorical columns if not specified
+            self.categorical_cols = X.select_dtypes(
+                include=["object"]).columns.tolist()
+
+        # Filter to only existing columns
+        self.categorical_cols = [
+            col for col in self.categorical_cols if col in X.columns]
+
+        if self.categorical_cols:
+            self.encoder_ = OneHotEncoder(
+                drop=self.drop,
+                sparse_output=False,
+                handle_unknown="ignore",
+            )
+            self.encoder_.fit(X[self.categorical_cols])
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X = X.copy()
+        if not self.categorical_cols or self.encoder_ is None:
+            return X
+
+        encoded = self.encoder_.transform(X[self.categorical_cols])
+        feature_names = self.encoder_.get_feature_names_out(
+            self.categorical_cols)
+
+        encoded_df = pd.DataFrame(
+            encoded, columns=feature_names, index=X.index)
+        X = X.drop(columns=self.categorical_cols)
+        X = pd.concat([X, encoded_df], axis=1)
+        return X
+
+
+class MissingValueHandler(BaseEstimator, TransformerMixin):
+    """Handle missing values via imputation or removal."""
+
+    def __init__(self, strategy: str = "median", threshold: float = 0.5):
+        """
+        Args:
+            strategy: 'mean', 'median', 'most_frequent', or 'drop'
+            threshold: drop columns with >threshold missing fraction
+        """
+        self.strategy = strategy
+        self.threshold = threshold
+        self.imputer_ = None
+
+    def fit(self, X: pd.DataFrame, y=None):
+        X = X.copy()
+
+        # Drop columns with too many missing values
+        missing_frac = X.isnull().sum() / len(X)
+        self.cols_to_drop_ = missing_frac[missing_frac >
+                                          self.threshold].index.tolist()
+
+        X = X.drop(columns=self.cols_to_drop_, errors="ignore")
+
+        # Fit imputer on numerical columns
+        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        if numeric_cols:
+            self.imputer_ = SimpleImputer(strategy=self.strategy)
+            self.imputer_.fit(X[numeric_cols])
+
+        self.numeric_cols_ = numeric_cols
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X = X.copy()
+        X = X.drop(columns=self.cols_to_drop_, errors="ignore")
+
+        if self.imputer_ is not None and self.numeric_cols_:
+            X[self.numeric_cols_] = self.imputer_.transform(
+                X[self.numeric_cols_])
+
+        return X
+
+
+class NumericalScaler(BaseEstimator, TransformerMixin):
+    """Standardize numerical features to mean=0, std=1."""
+
+    def __init__(self):
+        self.scaler_ = None
+        self.numeric_cols_ = None
+
+    def fit(self, X: pd.DataFrame, y=None):
+        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        self.numeric_cols_ = numeric_cols
+
+        if numeric_cols:
+            self.scaler_ = StandardScaler()
+            self.scaler_.fit(X[numeric_cols])
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X = X.copy()
+        if self.scaler_ is not None and self.numeric_cols_:
+            X[self.numeric_cols_] = self.scaler_.transform(
+                X[self.numeric_cols_])
+        return X
+
+
+def build_preprocessing_pipeline(
+    categorical_cols: list[str] | None = None,
+    imputation_strategy: str = "median",
+    standardize: bool = True,
+) -> Pipeline:
+    """
+    Build a complete preprocessing pipeline for transaction-level data.
+
+    Args:
+        categorical_cols: List of categorical column names to encode.
+        imputation_strategy: Strategy for missing value imputation.
+        standardize: Whether to standardize numerical features.
+
+    Returns:
+        sklearn Pipeline that transforms raw transaction data.
+
+    Example:
+        >>> pipe = build_preprocessing_pipeline()
+        >>> df_processed = pipe.fit_transform(df_raw)
+    """
+    steps = [
+        ("temporal", TemporalFeatureExtractor(
+            timestamp_col="TransactionStartTime")),
+        ("missing_values", MissingValueHandler(strategy=imputation_strategy)),
+        ("categorical", CategoricalEncoder(categorical_cols=categorical_cols)),
+    ]
+
+    if standardize:
+        steps.append(("scaling", NumericalScaler()))
+
+    pipeline = Pipeline(steps, verbose=False)
+    logger.info("Built preprocessing pipeline with %d steps", len(steps))
+    return pipeline
+
+
+# ============================================================================
+# Data Loading and RFM-based Target Construction
+# ============================================================================
 
 
 def load_raw_transactions(path: str | Path) -> pd.DataFrame:
@@ -157,7 +351,8 @@ def engineer_customer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     first_tx = grouped["TransactionStartTime"].min()
     features["tenure_days"] = (reference_date - first_tx).dt.days.clip(lower=1)
-    features["transactions_per_day"] = features["frequency"] / features["tenure_days"]
+    features["transactions_per_day"] = features["frequency"] / \
+        features["tenure_days"]
 
     return features.reset_index()
 
@@ -182,14 +377,16 @@ def create_proxy_target(
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+    kmeans = KMeans(n_clusters=n_clusters,
+                    random_state=random_state, n_init=10)
     rfm["rfm_cluster"] = kmeans.fit_predict(X_scaled)
 
     # Risk score: higher recency and lower frequency/monetary => higher risk
     cluster_profiles = rfm.groupby("rfm_cluster")[rfm_cols].mean()
     cluster_profiles["risk_score"] = (
         cluster_profiles["recency_days"]
-        - cluster_profiles["frequency"] / (cluster_profiles["frequency"].max() + 1)
+        - cluster_profiles["frequency"] /
+        (cluster_profiles["frequency"].max() + 1)
         - cluster_profiles["monetary_total"]
         / (cluster_profiles["monetary_total"].max() + 1)
     )
@@ -216,7 +413,8 @@ def compute_weight_of_evidence(
     IV interpretation: <0.02 useless, 0.02-0.1 weak, 0.1-0.3 medium, >0.3 strong.
     """
     work = df[[feature, target]].dropna().copy()
-    work["bin"] = pd.qcut(work[feature], q=min(n_bins, work[feature].nunique()), duplicates="drop")
+    work["bin"] = pd.qcut(work[feature], q=min(
+        n_bins, work[feature].nunique()), duplicates="drop")
 
     grouped = work.groupby("bin", observed=True)[target].agg(["sum", "count"])
     grouped.columns = ["bad", "total"]
@@ -229,7 +427,8 @@ def compute_weight_of_evidence(
     grouped["dist_bad"] = (grouped["bad"] + eps) / (total_bad + eps)
     grouped["dist_good"] = (grouped["good"] + eps) / (total_good + eps)
     grouped["woe"] = np.log(grouped["dist_good"] / grouped["dist_bad"])
-    grouped["iv_component"] = (grouped["dist_good"] - grouped["dist_bad"]) * grouped["woe"]
+    grouped["iv_component"] = (
+        grouped["dist_good"] - grouped["dist_bad"]) * grouped["woe"]
 
     iv = float(grouped["iv_component"].sum())
     return grouped.reset_index(), iv
