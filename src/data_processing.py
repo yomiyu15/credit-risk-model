@@ -79,10 +79,12 @@ class TemporalFeatureExtractor(BaseEstimator, TransformerMixin):
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         X = X.copy()
         if self.timestamp_col not in X.columns:
-            logger.warning(f"Column {self.timestamp_col} not found; skipping temporal extraction")
+            logger.warning(
+                f"Column {self.timestamp_col} not found; skipping temporal extraction")
             return X
 
-        X[self.timestamp_col] = pd.to_datetime(X[self.timestamp_col], errors="coerce")
+        X[self.timestamp_col] = pd.to_datetime(
+            X[self.timestamp_col], errors="coerce")
         X["TransactionHour"] = X[self.timestamp_col].dt.hour
         X["TransactionDay"] = X[self.timestamp_col].dt.day
         X["TransactionMonth"] = X[self.timestamp_col].dt.month
@@ -103,10 +105,12 @@ class CategoricalEncoder(BaseEstimator, TransformerMixin):
     def fit(self, X: pd.DataFrame, y=None):
         if not self.categorical_cols:
             # Auto-detect categorical columns if not specified
-            self.categorical_cols = X.select_dtypes(include=["object"]).columns.tolist()
+            self.categorical_cols = X.select_dtypes(
+                include=["object"]).columns.tolist()
 
         # Filter to only existing columns
-        self.categorical_cols = [col for col in self.categorical_cols if col in X.columns]
+        self.categorical_cols = [
+            col for col in self.categorical_cols if col in X.columns]
 
         if self.categorical_cols:
             self.encoder_ = OneHotEncoder(
@@ -123,9 +127,11 @@ class CategoricalEncoder(BaseEstimator, TransformerMixin):
             return X
 
         encoded = self.encoder_.transform(X[self.categorical_cols])
-        feature_names = self.encoder_.get_feature_names_out(self.categorical_cols)
+        feature_names = self.encoder_.get_feature_names_out(
+            self.categorical_cols)
 
-        encoded_df = pd.DataFrame(encoded, columns=feature_names, index=X.index)
+        encoded_df = pd.DataFrame(
+            encoded, columns=feature_names, index=X.index)
         X = pd.concat([X, encoded_df], axis=1)
         return X
 
@@ -148,7 +154,8 @@ class MissingValueHandler(BaseEstimator, TransformerMixin):
 
         # Drop columns with too many missing values
         missing_frac = X.isnull().sum() / len(X)
-        self.cols_to_drop_ = missing_frac[missing_frac > self.threshold].index.tolist()
+        self.cols_to_drop_ = missing_frac[missing_frac >
+                                          self.threshold].index.tolist()
 
         X = X.drop(columns=self.cols_to_drop_, errors="ignore")
 
@@ -166,7 +173,8 @@ class MissingValueHandler(BaseEstimator, TransformerMixin):
         X = X.drop(columns=self.cols_to_drop_, errors="ignore")
 
         if self.imputer_ is not None and self.numeric_cols_:
-            X[self.numeric_cols_] = self.imputer_.transform(X[self.numeric_cols_])
+            X[self.numeric_cols_] = self.imputer_.transform(
+                X[self.numeric_cols_])
 
         return X
 
@@ -190,7 +198,8 @@ class NumericalScaler(BaseEstimator, TransformerMixin):
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         X = X.copy()
         if self.scaler_ is not None and self.numeric_cols_:
-            X[self.numeric_cols_] = self.scaler_.transform(X[self.numeric_cols_])
+            X[self.numeric_cols_] = self.scaler_.transform(
+                X[self.numeric_cols_])
         return X
 
 
@@ -198,65 +207,68 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
     """
     High-level feature engineering pipeline combining temporal, categorical,
     and frequency-based features. Compatible with sklearn fit/transform API.
-    
+
     This is the main interface for transaction-level feature engineering.
     """
-    
+
     def __init__(self, standardize: bool = False):
         self.standardize = standardize
         self.pipeline_ = None
-        
+
     def fit(self, X: pd.DataFrame, y=None):
         """Fit all transformers in the pipeline."""
         X = X.copy()
-        
+
         # Detect categorical columns automatically
         categorical_cols = X.select_dtypes(include=['object']).columns.tolist()
         # Remove timestamp columns from categorical
-        categorical_cols = [c for c in categorical_cols if 'time' not in c.lower()]
-        
+        categorical_cols = [
+            c for c in categorical_cols if 'time' not in c.lower()]
+
         steps = [
-            ("temporal", TemporalFeatureExtractor(timestamp_col="TransactionStartTime")),
+            ("temporal", TemporalFeatureExtractor(
+                timestamp_col="TransactionStartTime")),
             ("missing_values", MissingValueHandler(strategy="median")),
             ("categorical", CategoricalEncoder(categorical_cols=categorical_cols)),
         ]
-        
+
         if self.standardize:
             steps.append(("scaling", NumericalScaler()))
-        
+
         self.pipeline_ = Pipeline(steps, verbose=False)
         self.pipeline_.fit(X, y)
         return self
-    
+
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply pipeline transformations and compute frequency features."""
         if self.pipeline_ is None:
             raise RuntimeError("Pipeline must be fitted before transform")
-        
+
         X_orig = X.copy()
-        
+
         # Apply pipeline transformations
         X = self.pipeline_.transform(X_orig)
-        
+
         # Add frequency features for categorical columns
         freq_cols = ['ProviderId', 'ProductId', 'ProductCategory', 'ChannelId']
         for col in freq_cols:
             if col in X_orig.columns:
                 freq_name = f"{col}_freq"
-                X[freq_name] = X_orig[col].map(X_orig[col].value_counts()).fillna(1)
-        
+                X[freq_name] = X_orig[col].map(
+                    X_orig[col].value_counts()).fillna(1)
+
         # Add ratio feature if both Amount and Value exist
         if 'Amount' in X.columns and 'Value' in X.columns:
             X['Amount_Value_Ratio'] = (
                 X['Amount'] / (X['Value'] + 1e-6)
             )
-        
+
         # Preserve target variable if present
         if 'is_high_risk' in X_orig.columns:
             X['is_high_risk'] = X_orig['is_high_risk']
-        
+
         return X
-    
+
     def fit_transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
         """Fit and transform in one step."""
         return self.fit(X, y).transform(X)
@@ -279,7 +291,8 @@ def build_preprocessing_pipeline(
         sklearn Pipeline that transforms raw transaction data.
     """
     steps = [
-        ("temporal", TemporalFeatureExtractor(timestamp_col="TransactionStartTime")),
+        ("temporal", TemporalFeatureExtractor(
+            timestamp_col="TransactionStartTime")),
         ("missing_values", MissingValueHandler(strategy=imputation_strategy)),
         ("categorical", CategoricalEncoder(categorical_cols=categorical_cols)),
     ]
@@ -402,14 +415,14 @@ def engineer_customer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def create_proxy_target(
     rfm: pd.DataFrame,
-    n_clusters: int = 4,
+    n_clusters: int = 3,
     random_state: int = RANDOM_STATE,
 ) -> pd.DataFrame:
     """
     Label high-risk customers via RFM clustering.
 
     Business rule: cluster with worst combined RFM profile (high recency,
-    low frequency, low monetary) is assigned default_risk=1 (bad).
+    low frequency, low monetary) is assigned is_high_risk=1 (bad).
     This proxy aligns with churn/inactivity risk as a stand-in for credit default
     when no loan performance history exists.
     """
@@ -434,12 +447,12 @@ def create_proxy_target(
         / (cluster_profiles["monetary_total"].max() + 1)
     )
     bad_cluster = int(cluster_profiles["risk_score"].idxmax())
-    rfm["default_risk"] = (rfm["rfm_cluster"] == bad_cluster).astype(int)
+    rfm["is_high_risk"] = (rfm["rfm_cluster"] == bad_cluster).astype(int)
 
     logger.info(
         "Proxy target: cluster %d labeled high-risk (%.1f%% of customers)",
         bad_cluster,
-        100 * rfm["default_risk"].mean(),
+        100 * rfm["is_high_risk"].mean(),
     )
     return rfm
 
@@ -447,7 +460,7 @@ def create_proxy_target(
 def compute_weight_of_evidence(
     df: pd.DataFrame,
     feature: str,
-    target: str = "default_risk",
+    target: str = "is_high_risk",
     n_bins: int = 10,
 ) -> tuple[pd.DataFrame, float]:
     """
@@ -480,7 +493,7 @@ def compute_weight_of_evidence(
 def select_features_by_iv(
     df: pd.DataFrame,
     features: list[str],
-    target: str = "default_risk",
+    target: str = "is_high_risk",
     min_iv: float = 0.02,
 ) -> tuple[list[str], pd.DataFrame]:
     """Return features with IV >= min_iv and full IV summary table."""
@@ -505,7 +518,7 @@ def select_features_by_iv(
 
 def build_modeling_dataset(
     df: pd.DataFrame,
-    n_clusters: int = 4,
+    n_clusters: int = 3,
     min_iv: float = 0.02,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
@@ -516,7 +529,7 @@ def build_modeling_dataset(
     features = engineer_customer_features(df)
 
     dataset = features.merge(
-        rfm_labeled[["CustomerId", "default_risk", "rfm_cluster"]],
+        rfm_labeled[["CustomerId", "is_high_risk", "rfm_cluster"]],
         on="CustomerId",
     )
 
@@ -526,7 +539,7 @@ def build_modeling_dataset(
 
     metadata = {
         "n_customers": len(dataset),
-        "default_rate": float(dataset["default_risk"].mean()),
+        "default_rate": float(dataset["is_high_risk"].mean()),
         "selected_features": selected,
         "iv_summary": iv_table.to_dict(orient="records"),
         "n_clusters": n_clusters,
@@ -551,7 +564,7 @@ def save_processed_data(
 def run_processing_pipeline(
     raw_path: str | Path,
     output_dir: str | Path,
-    n_clusters: int = 4,
+    n_clusters: int = 3,
 ) -> pd.DataFrame:
     """CLI entrypoint for feature engineering."""
     df = load_raw_transactions(raw_path)
@@ -567,7 +580,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process Xente transactions")
     parser.add_argument(
         "--input",
-        default="data/raw/training.csv",
+        default="data/raw/data.csv",
         help="Path to raw transaction CSV",
     )
     parser.add_argument(
@@ -575,6 +588,6 @@ if __name__ == "__main__":
         default="data/processed",
         help="Output directory for processed features",
     )
-    parser.add_argument("--clusters", type=int, default=4)
+    parser.add_argument("--clusters", type=int, default=3)
     args = parser.parse_args()
     run_processing_pipeline(args.input, args.output, n_clusters=args.clusters)
